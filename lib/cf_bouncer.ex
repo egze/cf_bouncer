@@ -169,7 +169,10 @@ defmodule CfBouncer do
   end
 
   defp update_rule!(zone_id, ruleset_id, rule_id, body) do
-    case Req.patch(req(), url: "/zones/#{zone_id}/rulesets/#{ruleset_id}/rules/#{rule_id}", json: body) do
+    case Req.patch(req(),
+           url: "/zones/#{zone_id}/rulesets/#{ruleset_id}/rules/#{rule_id}",
+           json: body
+         ) do
       {:ok, %{body: %{"success" => true}}} ->
         :ok
 
