@@ -2,7 +2,7 @@
 
 Automatically syncs a Cloudflare WAF block rule from your Phoenix router. Any request to a path not defined in your routes, sockets, or static files gets blocked.
 
-Keeps your WAF in sync with your code — run it in your deploy script and forget about it.
+Keeps your WAF in sync with your code - run it in your deploy script and forget about it.
 
 ## How it works
 
