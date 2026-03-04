@@ -17,38 +17,80 @@ defmodule CfBouncer do
       config :cf_bouncer,
         zone_id: System.get_env("CLOUDFLARE_ZONE_ID"),
         api_token: System.get_env("CLOUDFLARE_API_TOKEN")
+
+  ## Usage
+
+  All public functions accept a keyword list of options instead of reading
+  application config directly, making this library usable without being a
+  supervised OTP app.
+
+      opts = [
+        router: MyAppWeb.Router,
+        endpoint: MyAppWeb.Endpoint,
+        static_module: MyAppWeb,
+        extra_paths: ["/cf-fonts/"],
+        zone_id: "your-zone-id",
+        api_token: "your-api-token",
+        rule_description: "[CfBouncer] Block non-allowlisted paths"
+      ]
+
+      CfBouncer.build_expression(opts)
+      CfBouncer.sync(opts)
   """
+
+  @base_url "https://api.cloudflare.com/client/v4"
 
   @doc """
   Builds the WAF expression string from configured routes, sockets, and static paths.
+
+  ## Options
+
+    * `:router` — Phoenix router module (required)
+    * `:endpoint` — Phoenix endpoint module (required)
+    * `:static_module` — module with `static_paths/0` (required)
+    * `:extra_paths` — additional path prefixes to allow (default: `[]`)
   """
-  def build_expression do
-    route_conditions = route_conditions()
-    static_conditions = static_conditions()
-    extra_conditions = extra_conditions()
+  def build_expression(opts) do
+    route_conditions = route_conditions(opts)
+    static_conditions = static_conditions(opts)
+    extra_conditions = extra_conditions(opts)
 
     all_conditions =
       (route_conditions ++ static_conditions ++ extra_conditions)
       |> Enum.uniq()
       |> Enum.sort()
 
-    "not (\n  " <> Enum.join(all_conditions, "\n  or ") <> "\n)"
+    EEx.eval_string(
+      """
+      not (
+        <%= Enum.join(conditions, "\\n  or ") %>
+      )\
+      """,
+      conditions: all_conditions
+    )
   end
 
   @doc """
   Syncs the WAF rule to Cloudflare. Creates the rule if it doesn't exist,
   updates it if the expression changed, or skips if already up to date.
 
+  Accepts all options from `build_expression/1` plus:
+
+    * `:zone_id` — Cloudflare zone ID (required)
+    * `:api_token` — Cloudflare API token (required)
+    * `:rule_description` — description for the WAF rule (required)
+    * `:force` — push even if unchanged (default: `false`)
+
   Returns `:created`, `:updated`, or `:up_to_date`.
   """
-  def sync(opts \\ []) do
+  def sync(opts) do
     force = Keyword.get(opts, :force, false)
-    expression = build_expression()
-    zone_id = config!(:zone_id)
-    rule_description = config!(:rule_description)
+    expression = build_expression(opts)
+    zone_id = Keyword.fetch!(opts, :zone_id)
+    rule_description = Keyword.fetch!(opts, :rule_description)
 
-    ruleset_id = find_ruleset!(zone_id)
-    rule = find_rule(zone_id, ruleset_id, rule_description)
+    ruleset_id = find_ruleset!(zone_id, opts)
+    rule = find_rule(zone_id, ruleset_id, rule_description, opts)
 
     body = %{
       action: "block",
@@ -58,22 +100,24 @@ defmodule CfBouncer do
 
     case rule do
       nil ->
-        create_rule!(zone_id, ruleset_id, body)
+        create_rule!(zone_id, ruleset_id, body, opts)
         :created
 
       %{"expression" => ^expression} when not force ->
         :up_to_date
 
       %{"id" => rule_id} ->
-        update_rule!(zone_id, ruleset_id, rule_id, body)
+        update_rule!(zone_id, ruleset_id, rule_id, body, opts)
         :updated
     end
   end
 
   # Expression building
 
-  defp route_conditions do
-    config!(:router).__routes__()
+  defp route_conditions(opts) do
+    router = Keyword.fetch!(opts, :router)
+
+    router.__routes__()
     |> Enum.map(& &1.path)
     |> Enum.uniq()
     |> Enum.map(fn "/" <> rest ->
@@ -82,7 +126,7 @@ defmodule CfBouncer do
         [first | _] -> "/#{first}"
       end
     end)
-    |> Enum.concat(socket_prefixes())
+    |> Enum.concat(socket_prefixes(opts))
     |> Enum.uniq()
     |> Enum.sort()
     |> Enum.map(fn
@@ -91,14 +135,18 @@ defmodule CfBouncer do
     end)
   end
 
-  defp socket_prefixes do
-    config!(:endpoint).__sockets__()
+  defp socket_prefixes(opts) do
+    endpoint = Keyword.fetch!(opts, :endpoint)
+
+    endpoint.__sockets__()
     |> Enum.map(fn {path, _module, _opts} -> path end)
     |> Enum.reject(&String.contains?(&1, "live_reload"))
   end
 
-  defp static_conditions do
-    config!(:static_module).static_paths()
+  defp static_conditions(opts) do
+    static_module = Keyword.fetch!(opts, :static_module)
+
+    static_module.static_paths()
     |> Enum.map(fn path ->
       if String.contains?(path, ".") do
         ~s[starts_with(http.request.uri.path, "/#{path}")]
@@ -108,8 +156,8 @@ defmodule CfBouncer do
     end)
   end
 
-  defp extra_conditions do
-    case Application.get_env(:cf_bouncer, :extra_paths, []) do
+  defp extra_conditions(opts) do
+    case Keyword.get(opts, :extra_paths, []) do
       [] -> []
       paths -> Enum.map(paths, &~s[starts_with(http.request.uri.path, "#{&1}")])
     end
@@ -117,23 +165,8 @@ defmodule CfBouncer do
 
   # Cloudflare API
 
-  defp req do
-    opts = [
-      base_url: "https://api.cloudflare.com/client/v4",
-      headers: [{"Authorization", "Bearer #{config!(:api_token)}"}]
-    ]
-
-    opts =
-      case Application.get_env(:cf_bouncer, :plug) do
-        nil -> opts
-        plug -> Keyword.put(opts, :plug, plug)
-      end
-
-    Req.new(opts)
-  end
-
-  defp find_ruleset!(zone_id) do
-    case cf_get("/zones/#{zone_id}/rulesets") do
+  defp find_ruleset!(zone_id, opts) do
+    case cf_request(:get, "/zones/#{zone_id}/rulesets", opts) do
       %{"success" => true, "result" => rulesets} ->
         case Enum.find(rulesets, &(&1["phase"] == "http_request_firewall_custom")) do
           %{"id" => id} -> id
@@ -145,8 +178,8 @@ defmodule CfBouncer do
     end
   end
 
-  defp find_rule(zone_id, ruleset_id, rule_description) do
-    case cf_get("/zones/#{zone_id}/rulesets/#{ruleset_id}") do
+  defp find_rule(zone_id, ruleset_id, rule_description, opts) do
+    case cf_request(:get, "/zones/#{zone_id}/rulesets/#{ruleset_id}", opts) do
       %{"success" => true, "result" => %{"rules" => rules}} ->
         Enum.find(rules, &(&1["description"] == rule_description))
 
@@ -155,44 +188,61 @@ defmodule CfBouncer do
     end
   end
 
-  defp create_rule!(zone_id, ruleset_id, body) do
-    case Req.post(req(), url: "/zones/#{zone_id}/rulesets/#{ruleset_id}/rules", json: body) do
-      {:ok, %{body: %{"success" => true}}} ->
+  defp create_rule!(zone_id, ruleset_id, body, opts) do
+    case cf_request(:post, "/zones/#{zone_id}/rulesets/#{ruleset_id}/rules", opts, body) do
+      %{"success" => true} ->
         :ok
 
-      {:ok, %{status: status, body: body}} ->
-        Mix.raise("Failed to create rule (#{status}): #{inspect(body)}")
-
-      {:error, reason} ->
-        Mix.raise("Request failed: #{inspect(reason)}")
+      resp ->
+        Mix.raise("Failed to create rule: #{inspect(resp)}")
     end
   end
 
-  defp update_rule!(zone_id, ruleset_id, rule_id, body) do
-    case Req.patch(req(),
-           url: "/zones/#{zone_id}/rulesets/#{ruleset_id}/rules/#{rule_id}",
-           json: body
+  defp update_rule!(zone_id, ruleset_id, rule_id, body, opts) do
+    case cf_request(
+           :patch,
+           "/zones/#{zone_id}/rulesets/#{ruleset_id}/rules/#{rule_id}",
+           opts,
+           body
          ) do
-      {:ok, %{body: %{"success" => true}}} ->
+      %{"success" => true} ->
         :ok
 
-      {:ok, %{status: status, body: body}} ->
-        Mix.raise("Failed to update rule (#{status}): #{inspect(body)}")
-
-      {:error, reason} ->
-        Mix.raise("Request failed: #{inspect(reason)}")
+      resp ->
+        Mix.raise("Failed to update rule: #{inspect(resp)}")
     end
   end
 
-  defp cf_get(path) do
-    {:ok, %{body: body}} = Req.get(req(), url: path)
-    body
-  end
+  defp cf_request(method, path, opts, body \\ nil) do
+    api_token = Keyword.fetch!(opts, :api_token)
+    url = @base_url <> path
+    headers = [{~c"Authorization", ~c"Bearer #{api_token}"}]
 
-  # Config
+    ssl_opts = [
+      ssl: [
+        verify: :verify_peer,
+        cacerts: :public_key.cacerts_get(),
+        depth: 3
+      ]
+    ]
 
-  defp config!(key) do
-    Application.get_env(:cf_bouncer, key) ||
-      Mix.raise("Missing :cf_bouncer config: #{inspect(key)}")
+    request =
+      case {method, body} do
+        {:get, _} ->
+          :httpc.request(:get, {url, headers}, ssl_opts, [])
+
+        {m, body} when m in [:post, :patch] ->
+          json_body = Jason.encode!(body)
+          content_type = ~c"application/json"
+          :httpc.request(m, {url, headers, content_type, json_body}, ssl_opts, [])
+      end
+
+    case request do
+      {:ok, {{_, _status, _}, _resp_headers, resp_body}} ->
+        Jason.decode!(to_string(resp_body))
+
+      {:error, reason} ->
+        Mix.raise("HTTP request failed: #{inspect(reason)}")
+    end
   end
 end

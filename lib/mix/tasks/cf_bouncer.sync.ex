@@ -21,13 +21,15 @@ defmodule Mix.Tasks.CfBouncer.Sync do
 
   @impl true
   def run(args) do
+    opts = config()
+
     cond do
       "--dry-run" in args ->
-        expression = CfBouncer.build_expression()
+        expression = CfBouncer.build_expression(opts)
         Mix.shell().info("Generated WAF expression:\n\n#{expression}\n")
 
       true ->
-        opts = if "--force" in args, do: [force: true], else: []
+        opts = if "--force" in args, do: Keyword.put(opts, :force, true), else: opts
 
         case CfBouncer.sync(opts) do
           :created -> Mix.shell().info("WAF rule created.")
@@ -35,5 +37,17 @@ defmodule Mix.Tasks.CfBouncer.Sync do
           :up_to_date -> Mix.shell().info("WAF rule already up to date.")
         end
     end
+  end
+
+  defp config do
+    [
+      router: Application.fetch_env!(:cf_bouncer, :router),
+      endpoint: Application.fetch_env!(:cf_bouncer, :endpoint),
+      static_module: Application.fetch_env!(:cf_bouncer, :static_module),
+      rule_description: Application.fetch_env!(:cf_bouncer, :rule_description),
+      extra_paths: Application.get_env(:cf_bouncer, :extra_paths, []),
+      zone_id: Application.fetch_env!(:cf_bouncer, :zone_id),
+      api_token: Application.fetch_env!(:cf_bouncer, :api_token)
+    ]
   end
 end

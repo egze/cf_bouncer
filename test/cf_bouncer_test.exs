@@ -1,39 +1,26 @@
 defmodule CfBouncerTest do
   use ExUnit.Case
+  use Mimic
 
   @zone_id "test-zone-123"
   @ruleset_id "ruleset-456"
   @rule_id "rule-789"
   @rule_description "[CfBouncer] Block non-allowlisted paths"
 
-  @rulesets_path "/client/v4/zones/#{@zone_id}/rulesets"
-  @ruleset_path "/client/v4/zones/#{@zone_id}/rulesets/#{@ruleset_id}"
+  @base_opts [
+    router: CfBouncer.Test.FakeRouter,
+    endpoint: CfBouncer.Test.FakeEndpoint,
+    static_module: CfBouncer.Test.FakeStatic,
+    rule_description: @rule_description,
+    zone_id: @zone_id,
+    api_token: "test-token"
+  ]
 
-  setup do
-    Application.put_env(:cf_bouncer, :router, CfBouncer.Test.FakeRouter)
-    Application.put_env(:cf_bouncer, :endpoint, CfBouncer.Test.FakeEndpoint)
-    Application.put_env(:cf_bouncer, :static_module, CfBouncer.Test.FakeStatic)
-    Application.put_env(:cf_bouncer, :rule_description, @rule_description)
-    Application.put_env(:cf_bouncer, :zone_id, @zone_id)
-    Application.put_env(:cf_bouncer, :api_token, "test-token")
-    Application.put_env(:cf_bouncer, :plug, {Req.Test, CfBouncer})
-    Application.delete_env(:cf_bouncer, :extra_paths)
-
-    :ok
+  defp json_response(body) do
+    {:ok, {{~c"HTTP/1.1", 200, ~c"OK"}, [], Jason.encode!(body) |> to_charlist()}}
   end
 
-  defp stub_rulesets(conn) do
-    Req.Test.json(conn, %{
-      success: true,
-      result: [%{"id" => @ruleset_id, "phase" => "http_request_firewall_custom"}]
-    })
-  end
-
-  defp stub_rules(conn, rules) do
-    Req.Test.json(conn, %{success: true, result: %{"rules" => rules}})
-  end
-
-  describe "build_expression/0" do
+  describe "build_expression/1" do
     test "builds the full expression from routes, sockets, and static paths" do
       expected = """
       not (
@@ -48,11 +35,11 @@ defmodule CfBouncerTest do
       )\
       """
 
-      assert CfBouncer.build_expression() == expected
+      assert CfBouncer.build_expression(@base_opts) == expected
     end
 
     test "includes extra_paths sorted with the rest" do
-      Application.put_env(:cf_bouncer, :extra_paths, ["/cf-fonts/", "/webhooks/"])
+      opts = Keyword.put(@base_opts, :extra_paths, ["/cf-fonts/", "/webhooks/"])
 
       expected = """
       not (
@@ -69,91 +56,126 @@ defmodule CfBouncerTest do
       )\
       """
 
-      assert CfBouncer.build_expression() == expected
+      assert CfBouncer.build_expression(opts) == expected
     end
   end
 
-  describe "sync/0" do
+  describe "sync/1" do
     test "creates rule when none exists" do
-      Req.Test.stub(CfBouncer, fn conn ->
-        case {conn.method, conn.request_path} do
-          {"GET", @rulesets_path} -> stub_rulesets(conn)
-          {"GET", @ruleset_path} -> stub_rules(conn, [])
-          {"POST", _} -> Req.Test.json(conn, %{success: true})
-        end
+      stub(:httpc, :request, fn
+        :get, {url, _headers}, _ssl_opts, _opts ->
+          cond do
+            String.ends_with?(url, "/rulesets") ->
+              json_response(%{
+                success: true,
+                result: [%{"id" => @ruleset_id, "phase" => "http_request_firewall_custom"}]
+              })
+
+            String.ends_with?(url, "/rulesets/#{@ruleset_id}") ->
+              json_response(%{success: true, result: %{"rules" => []}})
+          end
+
+        :post, {_url, _headers, _content_type, _body}, _ssl_opts, _opts ->
+          json_response(%{success: true})
       end)
 
-      assert CfBouncer.sync() == :created
+      assert CfBouncer.sync(@base_opts) == :created
     end
 
     test "returns up_to_date when expression matches" do
-      expression = CfBouncer.build_expression()
+      expression = CfBouncer.build_expression(@base_opts)
 
-      Req.Test.stub(CfBouncer, fn conn ->
-        case {conn.method, conn.request_path} do
-          {"GET", @rulesets_path} ->
-            stub_rulesets(conn)
+      stub(:httpc, :request, fn :get, {url, _headers}, _ssl_opts, _opts ->
+        cond do
+          String.ends_with?(url, "/rulesets") ->
+            json_response(%{
+              success: true,
+              result: [%{"id" => @ruleset_id, "phase" => "http_request_firewall_custom"}]
+            })
 
-          {"GET", @ruleset_path} ->
-            stub_rules(conn, [
-              %{
-                "id" => @rule_id,
-                "description" => @rule_description,
-                "expression" => expression
+          String.ends_with?(url, "/rulesets/#{@ruleset_id}") ->
+            json_response(%{
+              success: true,
+              result: %{
+                "rules" => [
+                  %{
+                    "id" => @rule_id,
+                    "description" => @rule_description,
+                    "expression" => expression
+                  }
+                ]
               }
-            ])
+            })
         end
       end)
 
-      assert CfBouncer.sync() == :up_to_date
+      assert CfBouncer.sync(@base_opts) == :up_to_date
     end
 
     test "updates rule when expression differs" do
-      Req.Test.stub(CfBouncer, fn conn ->
-        case {conn.method, conn.request_path} do
-          {"GET", @rulesets_path} ->
-            stub_rulesets(conn)
+      stub(:httpc, :request, fn
+        :get, {url, _headers}, _ssl_opts, _opts ->
+          cond do
+            String.ends_with?(url, "/rulesets") ->
+              json_response(%{
+                success: true,
+                result: [%{"id" => @ruleset_id, "phase" => "http_request_firewall_custom"}]
+              })
 
-          {"GET", @ruleset_path} ->
-            stub_rules(conn, [
-              %{
-                "id" => @rule_id,
-                "description" => @rule_description,
-                "expression" => "old expression"
-              }
-            ])
+            String.ends_with?(url, "/rulesets/#{@ruleset_id}") ->
+              json_response(%{
+                success: true,
+                result: %{
+                  "rules" => [
+                    %{
+                      "id" => @rule_id,
+                      "description" => @rule_description,
+                      "expression" => "old expression"
+                    }
+                  ]
+                }
+              })
+          end
 
-          {"PATCH", _} ->
-            Req.Test.json(conn, %{success: true})
-        end
+        :patch, {_url, _headers, _content_type, _body}, _ssl_opts, _opts ->
+          json_response(%{success: true})
       end)
 
-      assert CfBouncer.sync() == :updated
+      assert CfBouncer.sync(@base_opts) == :updated
     end
 
     test "force pushes even when expression matches" do
-      expression = CfBouncer.build_expression()
+      expression = CfBouncer.build_expression(@base_opts)
 
-      Req.Test.stub(CfBouncer, fn conn ->
-        case {conn.method, conn.request_path} do
-          {"GET", @rulesets_path} ->
-            stub_rulesets(conn)
+      stub(:httpc, :request, fn
+        :get, {url, _headers}, _ssl_opts, _opts ->
+          cond do
+            String.ends_with?(url, "/rulesets") ->
+              json_response(%{
+                success: true,
+                result: [%{"id" => @ruleset_id, "phase" => "http_request_firewall_custom"}]
+              })
 
-          {"GET", @ruleset_path} ->
-            stub_rules(conn, [
-              %{
-                "id" => @rule_id,
-                "description" => @rule_description,
-                "expression" => expression
-              }
-            ])
+            String.ends_with?(url, "/rulesets/#{@ruleset_id}") ->
+              json_response(%{
+                success: true,
+                result: %{
+                  "rules" => [
+                    %{
+                      "id" => @rule_id,
+                      "description" => @rule_description,
+                      "expression" => expression
+                    }
+                  ]
+                }
+              })
+          end
 
-          {"PATCH", _} ->
-            Req.Test.json(conn, %{success: true})
-        end
+        :patch, {_url, _headers, _content_type, _body}, _ssl_opts, _opts ->
+          json_response(%{success: true})
       end)
 
-      assert CfBouncer.sync(force: true) == :updated
+      assert CfBouncer.sync(Keyword.put(@base_opts, :force, true)) == :updated
     end
   end
 end

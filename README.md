@@ -65,6 +65,8 @@ Create at https://dash.cloudflare.com/profile/api-tokens. Use the **"Edit zone W
 
 ## Usage
 
+### Mix task
+
 Preview the generated WAF expression:
 
 ```sh
@@ -93,6 +95,28 @@ mix cf_bouncer.sync
 
 echo "Syncing files..."
 # ... rest of deploy
+```
+
+### Programmatic usage
+
+You can also call the library functions directly by passing config as a keyword list:
+
+```elixir
+opts = [
+  router: MyAppWeb.Router,
+  endpoint: MyAppWeb.Endpoint,
+  static_module: MyAppWeb,
+  extra_paths: ["/cf-fonts/"],
+  zone_id: "your-zone-id",
+  api_token: "your-api-token",
+  rule_description: "[CfBouncer] Block non-allowlisted paths"
+]
+
+# Just build the expression
+CfBouncer.build_expression(opts)
+
+# Build and sync to Cloudflare
+CfBouncer.sync(opts)
 ```
 
 ## Generated expression
