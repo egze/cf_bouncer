@@ -32,6 +32,26 @@ config :cf_bouncer,
 ### Optional keys
 
 - `extra_paths` — list of additional path prefixes to allow, e.g. `["/cf-fonts/", "/webhooks/"]`
+- `force` — (sync only) push even if unchanged
+
+## Programmatic usage
+
+Pass config as a keyword list directly — useful outside of mix tasks:
+
+```elixir
+opts = [
+  router: MyAppWeb.Router,
+  endpoint: MyAppWeb.Endpoint,
+  static_module: MyAppWeb,
+  extra_paths: ["/cf-fonts/"],
+  zone_id: "your-zone-id",
+  api_token: "your-api-token",
+  rule_description: "[CfBouncer] Block non-allowlisted paths"
+]
+
+CfBouncer.build_expression(opts)
+CfBouncer.sync(opts)
+```
 
 ## Mix task
 
@@ -48,7 +68,7 @@ The only mix task is `mix cf_bouncer.sync`.
 3. Static paths from `static_paths/0` — paths with a `.` are treated as files, paths without as directories (trailing `/`)
 4. Extra paths from config are added as-is
 
-All conditions are joined with `or` and wrapped in `not (...)`.
+All conditions are joined with `or` and wrapped in `not (...)`. The expression is rendered via EEx.
 
 ## Common patterns
 

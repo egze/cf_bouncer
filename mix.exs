@@ -24,7 +24,7 @@ defmodule CfBouncer.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger, :inets, :ssl]
     ]
   end
 
@@ -41,8 +41,8 @@ defmodule CfBouncer.MixProject do
 
   defp deps do
     [
-      {:req, "~> 0.5"},
-      {:plug, "~> 1.0", only: :test},
+      {:jason, "~> 1.4"},
+      {:mimic, "~> 1.0", only: :test},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false}
     ]
   end
