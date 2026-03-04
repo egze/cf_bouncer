@@ -19,7 +19,7 @@ Add `cf_bouncer` to your dependencies:
 ```elixir
 def deps do
   [
-    {:cf_bouncer, "~> 0.1"}
+    {:cf_bouncer, "~> 0.2"}
   ]
 end
 ```
